@@ -30,6 +30,19 @@ from urllib.robotparser import RobotFileParser
 from typing import Callable, Optional
 
 import requests
+
+try:
+    import cloudscraper
+    HAS_CLOUDSCRAPER = True
+except ImportError:
+    HAS_CLOUDSCRAPER = False
+
+try:
+    from DrissionPage import ChromiumPage, ChromiumOptions
+    HAS_DRISSION = True
+except ImportError:
+    HAS_DRISSION = False
+
 from bs4 import BeautifulSoup
 
 
@@ -192,7 +205,21 @@ class FileScraper:
         self.same_domain_only = same_domain_only
         self._log_callback = log_callback
 
-        self.session = requests.Session()
+        # 优先使用 cloudscraper 绕过 Cloudflare，回退到普通 session
+        if HAS_CLOUDSCRAPER:
+            try:
+                self.session = cloudscraper.create_scraper(
+                    browser={"browser": "chrome", "platform": "windows", "mobile": False},
+                    delay=10,
+                )
+                self._use_cloudscraper = True
+            except Exception:
+                self.session = requests.Session()
+                self._use_cloudscraper = False
+        else:
+            self.session = requests.Session()
+            self._use_cloudscraper = False
+
         self.session.headers.update(DEFAULT_HEADERS)
 
         # 已下载 URL 去重
@@ -223,6 +250,48 @@ class FileScraper:
             if lower.endswith(ext) or f"{ext}#" in lower:
                 return True
         return False
+
+    # ------------------------------------------------------------------
+    # 浏览器降级（DrissionPage 绕过 Cloudflare JS Challenge）
+    # ------------------------------------------------------------------
+
+    def _fetch_via_browser(self, url: str) -> tuple[str | None, str]:
+        """使用真实浏览器获取页面，返回 (html, final_url)"""
+        page = None
+        try:
+            co = ChromiumOptions()
+            co.set_argument("--headless=new")
+            co.set_argument("--no-sandbox")
+            co.set_argument("--disable-gpu")
+            co.set_argument("--disable-dev-shm-usage")
+
+            page = ChromiumPage(co)
+            page.get(url)
+
+            # 等待 Cloudflare challenge 自动完成（最多 15 秒）
+            for i in range(15):
+                time.sleep(1)
+                html = page.html
+                # Cloudflare challenge 页面通常很短，正常页面内容更长
+                if len(html) > 5000 and "challenge" not in html.lower():
+                    break
+                # 检查是否包含目标文件类型的标签
+                if "<img" in html.lower() or "<svg" in html.lower() or "<video" in html.lower():
+                    break
+
+            final_url = page.url
+            html = page.html
+            return html, final_url
+
+        except Exception as e:
+            self._log(f"  [浏览器错误] {e}")
+            return None, url
+        finally:
+            if page:
+                try:
+                    page.quit()
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     # 反爬相关
@@ -486,21 +555,34 @@ class FileScraper:
         self._log(f"最大重试: {self.max_retries}")
         self._log(f"robots.txt 检查: {'开启' if self.respect_robots else '关闭'}")
         self._log(f"仅同域: {'是' if self.same_domain_only else '否'}")
+        cf_status = "cloudscraper" if self._use_cloudscraper else ("DrissionPage 备用" if HAS_DRISSION else "无")
+        self._log(f"Cloudflare 绕过: {cf_status}")
         self._log("=" * 60)
 
         # 1. 获取页面（用户直接请求的主页面，跳过 robots.txt 检查）
         self._log("\n[1/4] 正在获取页面...")
         response = self.fetch(url, skip_robots=True)
-        if response is None:
+
+        # 如果普通请求被拦截（403），尝试 DrissionPage 浏览器模式
+        if response is None and HAS_DRISSION:
+            self._log("  [提示] 普通请求被拦截，尝试浏览器模式绕过 Cloudflare...")
+            html, final_url = self._fetch_via_browser(url)
+            if html:
+                soup = BeautifulSoup(html, "html.parser")
+                self._log(f"  浏览器模式成功获取页面 ({len(html)} 字节)")
+                # 将浏览器 cookie 注入 session，后续资源请求可能复用
+            else:
+                self._log("无法获取页面，退出。")
+                return
+        elif response is None:
             self._log("无法获取页面，退出。")
             return
-
-        if response.encoding is None or response.encoding == "ISO-8859-1":
-            response.encoding = response.apparent_encoding
-
-        html = response.text
-        final_url = response.url
-        soup = BeautifulSoup(html, "html.parser")
+        else:
+            if response.encoding is None or response.encoding == "ISO-8859-1":
+                response.encoding = response.apparent_encoding
+            html = response.text
+            final_url = response.url
+            soup = BeautifulSoup(html, "html.parser")
 
         # 2. 提取内联 SVG（仅 .svg 模式）
         self._log("\n[2/4] 提取内联内容...")

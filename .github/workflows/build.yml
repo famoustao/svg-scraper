@@ -1,0 +1,74 @@
+name: Build SVG Scraper
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        include:
+          - os: windows-latest
+            artifact_name: SVG-Scraper-Windows
+            file_ext: .exe
+          - os: ubuntu-latest
+            artifact_name: SVG-Scraper-Linux
+            file_ext: ""
+          - os: macos-latest
+            artifact_name: SVG-Scraper-macOS
+            file_ext: ""
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller requests beautifulsoup4
+
+      - name: 构建 Windows 可执行文件
+        if: matrix.os == 'windows-latest'
+        run: |
+          pyinstaller --noconfirm --onefile --windowed --name "SVGScraper" ^
+            --icon "NONE" ^
+            --add-data "svg_scraper.py;." ^
+            svg_scraper_gui.py
+        shell: cmd
+
+      - name: 构建 Linux/macOS 可执行文件
+        if: matrix.os != 'windows-latest'
+        run: |
+          pyinstaller --noconfirm --onefile --windowed --name "SVGScraper" \
+            --add-data "svg_scraper.py:." \
+            svg_scraper_gui.py
+        shell: bash
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/SVGScraper${{ matrix.file_ext }}
+          if-no-files-found: error
+
+      - name: 发布 Release（仅 tag 触发）
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/SVGScraper${{ matrix.file_ext }}
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

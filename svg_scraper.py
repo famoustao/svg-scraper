@@ -263,8 +263,8 @@ class FileScraper:
     # HTTP 请求（带重试）
     # ------------------------------------------------------------------
 
-    def fetch(self, url: str, referer: str | None = None) -> requests.Response | None:
-        if not self._check_robots(url):
+    def fetch(self, url: str, referer: str | None = None, skip_robots: bool = False) -> requests.Response | None:
+        if not skip_robots and not self._check_robots(url):
             self._log(f"  [跳过] robots.txt 禁止抓取: {url}")
             self.stats["skipped"] += 1
             return None
@@ -488,9 +488,9 @@ class FileScraper:
         self._log(f"仅同域: {'是' if self.same_domain_only else '否'}")
         self._log("=" * 60)
 
-        # 1. 获取页面
+        # 1. 获取页面（用户直接请求的主页面，跳过 robots.txt 检查）
         self._log("\n[1/4] 正在获取页面...")
-        response = self.fetch(url)
+        response = self.fetch(url, skip_robots=True)
         if response is None:
             self._log("无法获取页面，退出。")
             return
